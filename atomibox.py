@@ -1,8 +1,10 @@
-import sys, signal
-from PyQt4 import QtCore
-from PyQt4 import QtGui
+import sys
+import signal
+from PyQt5 import QtCore
+from PyQt5 import QtWidgets
+from PyQt5 import QtGui
 
-signal.signal(signal.SIGINT, signal.SIG_DFL)
+#signal.signal(signal.SIGINT, signal.SIG_DFL)
 
 class FileChange:
     def __init__(self):
@@ -19,14 +21,14 @@ def onQuit():
     QtCore.QCoreApplication.instance().quit()
 
 def main():
-    app = QtGui.QApplication(sys.argv)
+    app = QtWidgets.QApplication(sys.argv)
 
-    w = QtGui.QWidget()
+    w = QtWidgets.QWidget()
 
-    class SystemTrayIcon(QtGui.QSystemTrayIcon):
+    class SystemTrayIcon(QtWidgets.QSystemTrayIcon):
         def __init__(self, icon, parent=None):
-            QtGui.QSystemTrayIcon.__init__(self, icon, parent)
-            menu = QtGui.QMenu(parent)
+            QtWidgets.QSystemTrayIcon.__init__(self, icon, parent)
+            menu = QtWidgets.QMenu(parent)
             exitAction = menu.addAction(QtGui.QIcon("resources/quit.ico"), "E&xit")
             exitAction.triggered.connect(onQuit)
             self.setContextMenu(menu)
