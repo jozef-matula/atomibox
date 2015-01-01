@@ -1,8 +1,7 @@
+#!/usr/bin/env python
 import sys
 import signal
-from PyQt5 import QtCore
-from PyQt5 import QtWidgets
-from PyQt5 import QtGui
+import argparse
 
 #signal.signal(signal.SIGINT, signal.SIG_DFL)
 
@@ -17,13 +16,16 @@ class FileChangeProdider:
     def getChanges(self):
         return []
 
-def onQuit():
-    QtCore.QCoreApplication.instance().quit()
-
-def main():
+def mainUI():
+    from PyQt5 import QtCore
+    from PyQt5 import QtWidgets
+    from PyQt5 import QtGui
     app = QtWidgets.QApplication(sys.argv)
 
     w = QtWidgets.QWidget()
+
+    def onQuit():
+        QtCore.QCoreApplication.instance().quit()
 
     class SystemTrayIcon(QtWidgets.QSystemTrayIcon):
         def __init__(self, icon, parent=None):
@@ -40,5 +42,16 @@ def main():
     del app
     sys.exit(i_result)
 
+def mainService():
+    pass
+
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-s", "--service", action="store_true",
+            help="enables service mode (non-UI)")
+    args = parser.parse_args()
+
+    if args.service:
+        mainService()
+    else:
+        mainUI()
