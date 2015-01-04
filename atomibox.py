@@ -7,6 +7,7 @@ import threading
 import os
 import os.path
 import stat
+import hashlib
 
 #signal.signal(signal.SIGINT, signal.SIG_DFL)
 
@@ -19,7 +20,7 @@ def logDebug(s):
 
 def logError(s):
     # TODO: do something more proper
-    logDebug(s)
+    logDebug("ERROR: " + s)
 
 class ConfigurationLocation:
     def __init__(self, s_baseDirectoryPath = None):
@@ -86,12 +87,51 @@ class Atom:
         qi.bindValue(1, self.i_parentId)
         qi.bindValue(2, self.f_lastModificationTimeStamp)
         qi.bindValue(3, self.i_contentSize if hasattr(self, 'i_contentSize') else -1)
-        qi.bindValue(4, None)
+        qi.bindValue(4, self.s_contentHash)
         if qi.exec_():
             self.i_id = qi.lastInsertId()
             qi.finish()
         else:
-            logDebug("Failed to execute insert query: %s" % str(qi.lastError().text()))
+            logError("Failed to execute atom insert query: %s" % str(qi.lastError().text()))
+
+    def updateInDB(self, db):
+        qu = QtSql.QSqlQuery(db);
+        qu.prepare("UPDATE atoms SET name = ?, parentId = ?, lastModification = ?, contentSize = ?, contentHash = ? WHERE id = ?")
+        qu.bindValue(0, self.s_name)
+        qu.bindValue(1, self.i_parentId)
+        qu.bindValue(2, self.f_lastModificationTimeStamp)
+        qu.bindValue(3, self.i_contentSize if hasattr(self, 'i_contentSize') else -1)
+        qu.bindValue(4, self.s_contentHash)
+        qu.bindValue(5, self.i_id)
+        if qu.exec_():
+            qu.finish()
+        else:
+            logError("Failed to execute atom update query: %s" % str(qu.lastError().text()))
+
+    def removeFromDB(self, db):
+        def recursiveDelete(i_id):
+            q = QtSql.QSqlQuery(db)
+            q.prepare("SELECT id FROM atoms WHERE parentId = ?")
+            q.bindValue(0, i_id)
+            if q.exec_():
+                try:
+                    while q.next():
+                        r = q.record()
+                        recursiveDelete(r.field(0).value())
+                finally:
+                    q.finish()
+            else:
+                logError("Failed to execute atom cascade delete query: %s" % str(q.lastError().text()))
+
+            qd = QtSql.QSqlQuery(db);
+            qd.prepare("DELETE FROM atoms WHERE id = ?")
+            qd.bindValue(0, i_id)
+            if qd.exec_():
+                qd.finish()
+            else:
+                logError("Failed to execute atom delete query: %s" % str(qd.lastError().text()))
+
+        recursiveDelete(self.i_id)
 
     @staticmethod
     def initDBStructures(db):
@@ -163,6 +203,7 @@ class Atom:
         atom.i_parentId = int(v) if len(str(v)) > 0 else None
         v = r.field("lastModification").value()
         atom.f_lastModificationTimeStamp = float(v) if len(str(v)) > 0 else None
+        atom.s_contentHash = str(r.field("contentHash").value())
         return atom
 
 class DirectoryAtom(Atom):
@@ -212,7 +253,7 @@ class FileChangeDiscoveryThread(threading.Thread):
                 self.d_locationToData[loc.s_baseDirectoryPath] = locationData
 
             else:
-                logDebug("Failed to open database: %s" % str(db.lastError().text()))
+                logError("Failed to open database: %s" % str(db.lastError().text()))
 
     def __del__(self):
         # make sure all databases are close when this object is deleted
@@ -222,12 +263,12 @@ class FileChangeDiscoveryThread(threading.Thread):
 
     def run(self):
         logDebug("FileChangeDiscoveryThread starts...")
-        i_counter = 10
+        i_counter = 1000
         while not self.quitEvent.is_set(): # .wait(timeout)
             logDebug("FileChangeDiscoveryThread loops...")
             time.sleep(1)
 
-            if i_counter < 10:
+            if i_counter < 3:
                 i_counter += 1
                 continue
 
@@ -237,18 +278,18 @@ class FileChangeDiscoveryThread(threading.Thread):
                 self.scanDirectory(locationData.db, locationData.atom, 0)
 
             # TODO: this code is here just for debugging
-            q = QtSql.QSqlQuery(locationData.db);
-            q.exec("SELECT * FROM atoms")
-            while q.next():
-                r = q.record()
-                s = ", ".join([str(r.field(i).value()) for i in range(0, r.count())])
-                logDebug("ROW %s" % s)
-
+            #q = QtSql.QSqlQuery(locationData.db);
+            #q.exec("SELECT * FROM atoms")
+            #while q.next():
+            #    r = q.record()
+            #    s = ", ".join([str(r.field(i).value()) for i in range(0, r.count())])
+            #    logDebug("ROW %s" % s)
 
         logDebug("FileChangeDiscoveryThread quits...")
 
     def scanDirectory(self, db, directoryAtom, i_currentDepth):
-        logDebug("Scanning %s" % directoryAtom.s_localPath) 
+        if i_currentDepth == 0:
+            logDebug("Scanning %s" % directoryAtom.s_localPath) 
 
         # build list actual files and directories here
         a_currentAtoms = []
@@ -271,6 +312,10 @@ class FileChangeDiscoveryThread(threading.Thread):
 
             a_currentAtoms.append(atom)
 
+        d_nameToCurrentAtoms = {}
+        for currentAtom in a_currentAtoms:
+            d_nameToCurrentAtoms[currentAtom.s_name] = currentAtom
+
         a_recordedAtoms = Atom.listAtomsFromDBForParent(db, directoryAtom.i_id)
         d_nameToRecordedAtoms = {}
         for recordedAtom in a_recordedAtoms:
@@ -283,9 +328,9 @@ class FileChangeDiscoveryThread(threading.Thread):
                     atom = d_nameToRecordedAtoms[atom.s_name]
                     atom.s_localPath = os.path.join(directoryAtom.s_localPath, atom.s_name)
                 else:
-                    # new record
+                    # EVENT: new directory atom
                     atom.insertIntoDB(db)
-                    logDebug("Record for directory %s NOT found in #%s -> created #%d" % (
+                    logDebug("EVENT: detected new directory %s in #%s -> created #%d" % (
                             atom.s_name, str(directoryAtom.i_id), atom.i_id))
                     d_nameToRecordedAtoms[atom.s_name] = atom
                 assert atom.i_id is not None
@@ -293,22 +338,48 @@ class FileChangeDiscoveryThread(threading.Thread):
                 self.scanDirectory(db, atom, i_currentDepth + 1)
 
         for atom in a_currentAtoms:
-            if atom.s_name in d_nameToRecordedAtoms:
-                # record found
-                atom = d_nameToRecordedAtoms[atom.s_name]
-                logDebug("Record for %s FOUND in #%s as #%d" % (
-                        atom.s_name, str(directoryAtom.i_id), atom.i_id))
-            else:
+            recordedAtom = d_nameToRecordedAtoms[atom.s_name] if atom.s_name in d_nameToRecordedAtoms else None
+            #if recordedAtom is not None:
+            #    logDebug("Record for %s FOUND in #%s as #%d" % (
+            #            atom.s_name, str(directoryAtom.i_id), atom.i_id))
+            if isinstance(atom, FileAtom) and isinstance(recordedAtom, FileAtom):
+                # file record found
+                if isinstance(recordedAtom, FileAtom) and isinstance(atom, FileAtom):
+                    if recordedAtom.i_contentSize != atom.i_contentSize \
+                            or recordedAtom.f_lastModificationTimeStamp != atom.f_lastModificationTimeStamp:
+                        atom.s_contentHash = self.hashFileContent(atom.s_localPath)
+                        atom.i_id = recordedAtom.i_id
+                        atom.updateInDB(db)
+                        logDebug("EVENT: detected content modification in file %s (%s->%s) in #%s" % (
+                                atom.s_name, recordedAtom.s_contentHash, atom.s_contentHash, str(directoryAtom.i_id)))
+            if recordedAtom is None:
                 assert isinstance(atom, FileAtom)
-                # new record
+                # EVENT: new file atom
+                atom.s_contentHash = self.hashFileContent(atom.s_localPath)
                 atom.insertIntoDB(db)
-                logDebug("Record for %s NOT found in #%s -> created #%d" % (
-                        atom.s_name, str(directoryAtom.i_id), atom.i_id))
+                d_nameToRecordedAtoms[atom.s_name] = atom
+                logDebug("EVENT: detected new file %s (%s) in #%s -> created #%d" % (
+                        atom.s_name, atom.s_contentHash, str(directoryAtom.i_id), atom.i_id))
+
+        for recordedAtom in a_recordedAtoms:
+            if recordedAtom.s_name not in d_nameToCurrentAtoms:
+                # EVENT: deleted atom
+                recordedAtom.removeFromDB(db)
+                logDebug("EVENT: detected removal of atom %s #%d from #%s" % (
+                        recordedAtom.s_name, recordedAtom.i_id, str(directoryAtom.i_id)))
 
     def stop(self):
         self.quitEvent.set()
         logDebug("FileChangeDiscoveryThread stop requested...")
         self.join()
+
+    @staticmethod
+    def hashFileContent(s_filePath):
+        h = hashlib.sha1()
+        with open(s_filePath, "rb") as f:
+            data = f.read(1048576)
+            h.update(data)
+        return h.hexdigest()
 
 class HTTPServerThread(threading.Thread):
     def __init__(self, cfg):
@@ -364,8 +435,8 @@ if __name__ == '__main__':
 
     cfg = Configuration()
     #cfg.a_locations.append(ConfigurationLocation('/tmp'))
-    cfg.a_locations.append(ConfigurationLocation('/utils'))
-    #cfg.a_locations.append(ConfigurationLocation('/tmp2'))
+    #cfg.a_locations.append(ConfigurationLocation('/utils'))
+    cfg.a_locations.append(ConfigurationLocation('/tmp2'))
 
     if args.service:
         from PyQt5 import QtCore
