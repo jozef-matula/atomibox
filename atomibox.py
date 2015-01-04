@@ -175,18 +175,25 @@ class FileAtom(Atom):
         self.i_contentSize = None
 
 class FileChangeDiscoveryThread(threading.Thread):
+
+    class LocationData:
+        def __init__(self):
+            self.db = None
+            self.atom = None
+
     def __init__(self, cfg):
         threading.Thread.__init__(self)
         self.cfg = cfg
         self.lock = threading.Lock()
         self.quitEvent = threading.Event()
-        self.d_locationToDBAndAtom = {}
+        self.d_locationToData = {}
         logDebug("Available SQL drivers: %s" % str(QtSql.QSqlDatabase.drivers()))
         for loc in cfg.a_locations:
             logDebug("Opening database for %s" % loc.s_baseDirectoryPath)
             db = QtSql.QSqlDatabase().addDatabase("QSQLITE", "db-conn-" + loc.s_baseDirectoryPath)
             db.setDatabaseName(os.path.join(loc.s_baseDirectoryPath, ".atomibox.sqlite"));
             if db.open():
+                #logDebug("Available database tables: %s" % str(db.tables()))
                 r = db.driver().record("atoms")
                 as_columnNames = [str(r.fieldName(i)) for i in range(0, r.count())]
                 #logDebug("Current columns: %s" % ", ".join(as_columnNames))
@@ -195,78 +202,108 @@ class FileChangeDiscoveryThread(threading.Thread):
                 if len(as_columnNames) == 0:
                     Atom.initDBStructures(db)
 
-                # TODO: move else where into run()
                 atom = DirectoryAtom()
                 atom.s_name = loc.s_baseDirectoryPath
                 atom.s_localPath = os.path.abspath(loc.s_baseDirectoryPath)
-                self.scanDirectory(db, atom, 0)
 
-                # TODO: this code is here just for debugging
-                q = QtSql.QSqlQuery(db);
-                q.exec("SELECT * FROM atoms")
-                while q.next():
-                    r = q.record()
-                    s = ", ".join([str(r.field(i).value()) for i in range(0, r.count())])
-                    logDebug("ROW %s" % s)
+                locationData = FileChangeDiscoveryThread.LocationData()
+                locationData.db = db
+                locationData.atom = atom
+                self.d_locationToData[loc.s_baseDirectoryPath] = locationData
 
-                logDebug("Available database tables: %s" % str(db.tables()))
-
-                self.d_locationToDBAndAtom[loc.s_baseDirectoryPath] = (db, atom)
             else:
                 logDebug("Failed to open database: %s" % str(db.lastError().text()))
 
     def __del__(self):
         # make sure all databases are close when this object is deleted
-        for s, (db, atom) in self.d_locationToDBAndAtom.items():
+        for s, locationData in self.d_locationToData.items():
             logDebug("Closing database for %s" % s)
-            db.close()
+            locationData.db.close()
 
     def run(self):
         logDebug("FileChangeDiscoveryThread starts...")
+        i_counter = 10
         while not self.quitEvent.is_set(): # .wait(timeout)
             logDebug("FileChangeDiscoveryThread loops...")
             time.sleep(1)
+
+            if i_counter < 10:
+                i_counter += 1
+                continue
+
+            i_counter = 0
+            for loc in cfg.a_locations:
+                locationData = self.d_locationToData[loc.s_baseDirectoryPath]
+                self.scanDirectory(locationData.db, locationData.atom, 0)
+
+            # TODO: this code is here just for debugging
+            q = QtSql.QSqlQuery(locationData.db);
+            q.exec("SELECT * FROM atoms")
+            while q.next():
+                r = q.record()
+                s = ", ".join([str(r.field(i).value()) for i in range(0, r.count())])
+                logDebug("ROW %s" % s)
+
+
         logDebug("FileChangeDiscoveryThread quits...")
 
-    def scanDirectory(self, db, parentDirectoryAtom, i_currentDepth):
-        logDebug("Scanning %s" % parentDirectoryAtom.s_localPath) 
+    def scanDirectory(self, db, directoryAtom, i_currentDepth):
+        logDebug("Scanning %s" % directoryAtom.s_localPath) 
 
-        a_currentAtoms = Atom.listAtomsFromDBForParent(db, parentDirectoryAtom.i_id)
-        d_nameToAtom = {}
-        for atom in a_currentAtoms:
-            d_nameToAtom[atom.s_name] = atom
-
-        for s_name in os.listdir(parentDirectoryAtom.s_localPath):
+        # build list actual files and directories here
+        a_currentAtoms = []
+        for s_name in os.listdir(directoryAtom.s_localPath):
             if s_name == "." or s_name == ".." or (i_currentDepth == 0 and s_name == ".atomibox.sqlite"):
                 continue
-            s_path = os.path.join(parentDirectoryAtom.s_localPath, s_name)
-            #assert os.stat_float_times()
+            s_path = os.path.join(directoryAtom.s_localPath, s_name)
             t_stat = os.stat(s_path)
 
-            atom = None
-            if s_name in d_nameToAtom:
-                # record found
-                atom = d_nameToAtom[s_name]
-                logDebug("Record for %s FOUND in #%s as #%d" % (
-                        s_name, str(parentDirectoryAtom.i_id), atom.i_id))
+            # create temporary atom object
+            if stat.S_ISDIR(t_stat.st_mode):
+                atom = DirectoryAtom()
             else:
-                # new record
-                if stat.S_ISDIR(t_stat.st_mode):
-                    atom = DirectoryAtom()
-                else:
-                    atom = FileAtom()
-                    atom.i_contentSize = t_stat.st_size
-                atom.s_name = s_name
-                atom.i_parentId = parentDirectoryAtom.i_id
-                atom.f_lastModificationTimeStamp = t_stat.st_mtime
-                atom.insertIntoDB(db)
-                logDebug("Record for %s not found in #%s -> created #%d" % (
-                        s_name, str(parentDirectoryAtom.i_id), atom.i_id))
+                atom = FileAtom()
+                atom.i_contentSize = t_stat.st_size
+            atom.s_name = s_name
+            atom.i_parentId = directoryAtom.i_id
+            atom.f_lastModificationTimeStamp = t_stat.st_mtime
             atom.s_localPath = s_path
 
-            if stat.S_ISDIR(t_stat.st_mode):
-                assert isinstance(atom, DirectoryAtom)
+            a_currentAtoms.append(atom)
+
+        a_recordedAtoms = Atom.listAtomsFromDBForParent(db, directoryAtom.i_id)
+        d_nameToRecordedAtoms = {}
+        for recordedAtom in a_recordedAtoms:
+            d_nameToRecordedAtoms[recordedAtom.s_name] = recordedAtom
+
+        # now dive into subdirectories
+        for atom in a_currentAtoms:
+            if isinstance(atom, DirectoryAtom):
+                if atom.s_name in d_nameToRecordedAtoms:
+                    atom = d_nameToRecordedAtoms[atom.s_name]
+                    atom.s_localPath = os.path.join(directoryAtom.s_localPath, atom.s_name)
+                else:
+                    # new record
+                    atom.insertIntoDB(db)
+                    logDebug("Record for directory %s NOT found in #%s -> created #%d" % (
+                            atom.s_name, str(directoryAtom.i_id), atom.i_id))
+                    d_nameToRecordedAtoms[atom.s_name] = atom
+                assert atom.i_id is not None
+                assert atom.s_localPath is not None
                 self.scanDirectory(db, atom, i_currentDepth + 1)
+
+        for atom in a_currentAtoms:
+            if atom.s_name in d_nameToRecordedAtoms:
+                # record found
+                atom = d_nameToRecordedAtoms[atom.s_name]
+                logDebug("Record for %s FOUND in #%s as #%d" % (
+                        atom.s_name, str(directoryAtom.i_id), atom.i_id))
+            else:
+                assert isinstance(atom, FileAtom)
+                # new record
+                atom.insertIntoDB(db)
+                logDebug("Record for %s NOT found in #%s -> created #%d" % (
+                        atom.s_name, str(directoryAtom.i_id), atom.i_id))
 
     def stop(self):
         self.quitEvent.set()
